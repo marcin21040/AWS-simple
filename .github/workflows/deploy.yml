@@ -35,8 +35,74 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      public_ip: ${{ steps.address.outputs.public_ip }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Find or launch Frontend instance
+        id: instance
+        env:
+          TAG_NAME: ${{ vars.TAG_NAME || 'Frontend' }}
+          AMI_ID: ${{ vars.AMI_ID }}
+          INSTANCE_TYPE: ${{ vars.INSTANCE_TYPE || 't3.micro' }}
+          KEY_PAIR_NAME: ${{ vars.KEY_PAIR_NAME }}
+          SUBNET_ID: ${{ vars.SUBNET_ID }}
+          SECGRP_ID: ${{ vars.SECGRP_ID }}
+        run: |
+          set -euo pipefail
+          for name in AMI_ID KEY_PAIR_NAME SUBNET_ID SECGRP_ID; do
+            [[ -n "${!name}" ]] || { echo "Required Actions variable $name is missing." >&2; exit 1; }
+          done
+
+          instance_id="$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${TAG_NAME}" \
+                      "Name=instance-state-name,Values=pending,running" \
+            --query 'Reservations[].Instances[].InstanceId | [0]' \
+            --output text)"
+
+          if [[ -z "$instance_id" || "$instance_id" == "None" ]]; then
+            instance_id="$(aws ec2 run-instances \
+              --image-id "$AMI_ID" \
+              --instance-type "$INSTANCE_TYPE" \
+              --key-name "$KEY_PAIR_NAME" \
+              --subnet-id "$SUBNET_ID" \
+              --security-group-ids "$SECGRP_ID" \
+              --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${TAG_NAME}}]" \
+              --query 'Instances[0].InstanceId' \
+              --output text)"
+          fi
+
+          [[ "$instance_id" == i-* ]] || { echo "Could not find or launch an EC2 instance." >&2; exit 1; }
+          echo "instance_id=$instance_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for instance and get public IP
+        id: address
+        env:
+          INSTANCE_ID: ${{ steps.instance.outputs.instance_id }}
+        run: |
+          set -euo pipefail
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+          public_ip="$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)"
+          [[ -n "$public_ip" && "$public_ip" != "None" ]] || {
+            echo "The instance has no public IP. Check subnet public-IP assignment and routing." >&2
+            exit 1
+          }
+          echo "public_ip=$public_ip" >> "$GITHUB_OUTPUT"
+
   deploy:
-    needs: build
+    needs: [build, provision]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -48,7 +114,7 @@ jobs:
 
       - name: Validate deployment settings
         env:
-          EC2_INSTANCE_PUBLIC_IP: ${{ vars.EC2_INSTANCE_PUBLIC_IP }}
+          EC2_INSTANCE_PUBLIC_IP: ${{ needs.provision.outputs.public_ip }}
           EC2_SSH_USER: ${{ vars.EC2_SSH_USER || 'ec2-user' }}
           APP_PORT: ${{ vars.APP_PORT }}
           SSH_KEY: ${{ secrets.SSH_KEY }}
@@ -70,7 +136,7 @@ jobs:
       - name: Verify target instance
         id: target
         env:
-          EC2_INSTANCE_PUBLIC_IP: ${{ vars.EC2_INSTANCE_PUBLIC_IP }}
+          EC2_INSTANCE_PUBLIC_IP: ${{ needs.provision.outputs.public_ip }}
         run: |
           set -euo pipefail
           instance_id="$(aws ec2 describe-instances \
@@ -82,7 +148,7 @@ jobs:
 
       - name: Prepare verified SSH connection
         env:
-          EC2_INSTANCE_PUBLIC_IP: ${{ vars.EC2_INSTANCE_PUBLIC_IP }}
+          EC2_INSTANCE_PUBLIC_IP: ${{ needs.provision.outputs.public_ip }}
           EC2_SSH_USER: ${{ vars.EC2_SSH_USER || 'ec2-user' }}
           SSH_KEY: ${{ secrets.SSH_KEY }}
         run: |
@@ -101,6 +167,22 @@ jobs:
           EOF
           chmod 600 "$RUNNER_TEMP/ec2_ssh_config"
           ssh-keygen -y -f "$RUNNER_TEMP/ec2_deploy_key" > /dev/null
+
+      - name: Wait for SSH
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            if ssh -F "$RUNNER_TEMP/ec2_ssh_config" \
+              -o ConnectTimeout=5 ec2-deploy true; then
+              echo "SSH is ready."
+              exit 0
+            fi
+            if [[ "$attempt" -lt 30 ]]; then
+              sleep 10
+            fi
+          done
+          echo "SSH did not become available before the timeout." >&2
+          exit 1
 
       - name: Copy image to EC2
         env:
