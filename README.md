@@ -33,13 +33,14 @@ The `Build and deploy to EC2` GitHub Actions workflow builds the Docker image on
 
 Configure these repository secrets under **Settings → Secrets and variables → Actions**:
 
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: credentials allowed to call `ec2:DescribeInstances` in the configured region.
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: credentials allowed to call EC2 APIs in the configured region (required when not using OIDC role assumption).
 - `SSH_KEY`: unencrypted private SSH key authorized for the EC2 deployment user.
 
 Configure these repository variables:
 
 - `EC2_INSTANCE_PUBLIC_IP`: the instance's public IPv4 address.
 - `AWS_REGION`: the region containing the instance.
+- `AWS_ROLE_TO_ASSUME` (or `AWS_ROLE_ARN`): optional IAM role ARN for GitHub OIDC authentication. When set, the workflow can authenticate without access-key secrets.
 - `APP_PORT`: host port to publish for the web application, such as `80`.
 - `EC2_SSH_USER`: optional SSH username; defaults to `ec2-user` (set to `ubuntu` for a typical Ubuntu image).
 
