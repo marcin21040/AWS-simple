@@ -51,7 +51,7 @@ jobs:
       - name: Find or launch Frontend instance
         id: instance
         env:
-          TAG_NAME: ${{ vars.TAG_NAME || 'Frontend' }}
+          TAG_NAME: ${{ vars.TAG_NAME || 'AWS-simple-mw' }}
           AMI_ID: ${{ vars.AMI_ID }}
           INSTANCE_TYPE: ${{ vars.INSTANCE_TYPE || 't3.micro' }}
           KEY_PAIR_NAME: ${{ vars.KEY_PAIR_NAME }}
